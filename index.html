@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="auto">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Tasks — To-Do List</title>
+<meta name="description" content="A fast, offline to-do list with sub-tasks, priorities, due dates, tags and keyboard shortcuts.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23dfe7dc'/%3E%3Cpath d='M9 16.5l5 5 9-11' fill='none' stroke='%233f5340' stroke-width='3.2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+<script>
+  // Apply the saved theme before the stylesheet loads to avoid a flash of the wrong theme.
+  try {
+    var prefs = JSON.parse(localStorage.getItem('todo.prefs.v1') || '{}');
+    if (prefs && prefs.theme) document.documentElement.setAttribute('data-theme', prefs.theme);
+  } catch (err) { /* storage unavailable: keep "auto" */ }
+</script>
+<link rel="stylesheet" href="css/styles.css">
+</head>
+<body>
+<div class="window" id="app-shell">
+
+  <!-- ── Sidebar ───────────────────────────────────────────── -->
+  <aside class="sidebar" aria-label="Lists and tags">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true">✓</span>
+      <span class="brand-text">
+        <strong>Tasks</strong>
+        <span class="today" id="today"></span>
+      </span>
+    </div>
+
+    <nav class="side-block" aria-label="Views">
+      <p class="side-title">Views</p>
+      <div class="controls" id="views">
+        <button class="tab is-active" type="button" data-filter="all">All tasks <span class="count" data-count="all"></span></button>
+        <button class="tab" type="button" data-filter="today">Today <span class="count" data-count="today"></span></button>
+        <button class="tab" type="button" data-filter="active">Active <span class="count" data-count="active"></span></button>
+        <button class="tab" type="button" data-filter="completed">Done <span class="count" data-count="completed"></span></button>
+      </div>
+    </nav>
+
+    <section class="side-block" aria-label="Priority lists">
+      <p class="side-title">Lists</p>
+      <div class="facet-list" id="pri-list"></div>
+    </section>
+
+    <section class="side-block" aria-label="Tags">
+      <p class="side-title">Tags</p>
+      <div class="facet-list" id="tag-list"></div>
+    </section>
+
+    <div class="side-foot">
+      <button class="icon-btn" id="theme-btn" type="button" title="Switch theme (light / dark / auto)" aria-label="Switch theme">
+        <span id="theme-icon" aria-hidden="true">◐</span>
+      </button>
+      <button class="icon-btn" id="export-btn" type="button" title="Download all tasks as JSON" aria-label="Export tasks">⇩</button>
+      <button class="icon-btn" id="import-btn" type="button" title="Import tasks from a JSON file" aria-label="Import tasks">⇧</button>
+      <button class="icon-btn danger" id="reset-btn" type="button" title="Delete every task" aria-label="Delete all tasks">🗑</button>
+    </div>
+  </aside>
+
+  <!-- ── Board ─────────────────────────────────────────────── -->
+  <main class="board">
+    <header class="board-head">
+      <div class="board-heading">
+        <h1 id="board-title">All tasks</h1>
+        <p class="board-sub"><span id="board-count">0</span> <span id="board-note">· nothing scheduled</span></p>
+      </div>
+      <div class="board-tools">
+        <div class="search">
+          <input type="search" id="search" placeholder="Search  ( / )" aria-label="Search tasks" aria-describedby="search-hint">
+          <button class="search-clear" id="search-clear" type="button" hidden aria-label="Clear search">×</button>
+          <span id="search-hint" hidden>Type to filter tasks, sub-tasks, notes and tags.</span>
+        </div>
+        <label class="field compact">
+          <span>Sort</span>
+          <select id="sort" aria-label="Sort order">
+            <option value="manual" selected>Manual</option>
+            <option value="dueDate">Due date</option>
+            <option value="priority">Priority</option>
+            <option value="title">Title A–Z</option>
+            <option value="created">Newest first</option>
+          </select>
+        </label>
+        <button class="btn ghost" id="toggle-all" type="button" title="Mark every task as done">Mark all done</button>
+        <button class="btn ghost danger" id="clear-completed" type="button" title="Delete every finished task">Clear done</button>
+      </div>
+    </header>
+
+    <!-- Add a new task -->
+    <form class="add-row" id="add-form" autocomplete="off">
+      <span class="add-plus" aria-hidden="true">＋</span>
+      <input class="new-input" id="new-task" name="title" type="text" maxlength="200"
+             placeholder="Add New Task" aria-label="New task title" required>
+      <select id="new-priority" class="add-field" aria-label="Priority for the new task">
+        <option value="none" selected>No priority</option>
+        <option value="low">Low</option>
+        <option value="medium">Medium</option>
+        <option value="high">High</option>
+      </select>
+      <input type="date" id="new-due" class="add-field" aria-label="Due date for the new task">
+      <input type="text" id="new-tags" class="add-field" maxlength="120"
+             placeholder="tags, comma separated" aria-label="Tags for the new task">
+      <button class="btn primary" type="submit">Add task</button>
+    </form>
+
+    <section class="summary" aria-label="Progress summary">
+      <div class="summary-text" id="summary-text" aria-live="polite">&nbsp;</div>
+      <div class="progress" role="progressbar" aria-label="Tasks completed" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" id="progress">
+        <div class="progress-bar" id="progress-bar"></div>
+      </div>
+    </section>
+
+    <div class="board-scroll">
+      <ul class="task-list" id="task-list" aria-label="Task list"></ul>
+
+      <div class="empty" id="empty" hidden>
+        <div class="empty-art" aria-hidden="true">✓</div>
+        <h2 id="empty-title">All clear</h2>
+        <p id="empty-text">Add your first task above to get started.</p>
+      </div>
+    </div>
+
+    <footer class="foot">
+      <details>
+        <summary>Keyboard shortcuts</summary>
+        <ul class="keys">
+          <li><kbd>N</kbd> new task</li>
+          <li><kbd>/</kbd> search</li>
+          <li><kbd>Enter</kbd> save the detail panel · <kbd>Esc</kbd> revert it</li>
+          <li><kbd>Alt</kbd> + <kbd>↑</kbd> <kbd>↓</kbd> move the selected task</li>
+          <li><kbd>?</kbd> toggle help</li>
+        </ul>
+      </details>
+      <p class="store-note">Saved automatically in this browser (<code>localStorage</code>). No account, no server.</p>
+    </footer>
+  </main>
+
+  <!-- ── Detail rail ───────────────────────────────────────── -->
+  <aside class="detail" id="detail" aria-label="Task details" aria-live="polite"></aside>
+
+</div>
+
+<div class="toasts" id="toast-region" role="status" aria-live="polite"></div>
+<input type="file" id="import-file" accept="application/json,.json" hidden>
+
+<script src="js/store.js"></script>
+<script src="js/ui.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>

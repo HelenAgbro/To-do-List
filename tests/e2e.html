@@ -1,0 +1,419 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>e2e</title>
+<style>
+  body { font: 13px/1.5 ui-monospace, Menlo, monospace; margin: 16px; }
+  iframe { width: 1100px; height: 820px; border: 1px solid #999; }
+  pre { white-space: pre-wrap; }
+</style>
+</head>
+<body>
+<h1>End-to-end run</h1>
+<iframe id="app" src="../index.html"></iframe>
+<pre id="log">running…</pre>
+<script>
+/* Drives the real app (../index.html) inside an iframe and reports PASS/FAIL
+   lines into #log, so the result can be read with:
+     chrome --headless --allow-file-access-from-files --dump-dom tests/e2e.html  */
+(function () {
+  'use strict';
+
+  var out = document.getElementById('log');
+  var results = [];
+  var doc, win;
+
+  function log(line) { out.textContent += line + '\n'; }
+
+  function check(name, ok, extra) {
+    results.push(!!ok);
+    log((ok ? 'PASS  ' : 'FAIL  ') + name + (ok ? '' : '   -> ' + extra));
+  }
+
+  /* ---------------- iframe helpers ---------------- */
+
+  function q(selector) { return doc.querySelector(selector); }
+  function qa(selector) { return Array.prototype.slice.call(doc.querySelectorAll(selector)); }
+  function rows() { return qa('#task-list > li.task'); }
+  function titles() { return qa('#task-list .task-title').map(function (n) { return n.textContent; }); }
+  function storedTitles() {
+    try {
+      var raw = JSON.parse(win.localStorage.getItem('todo.list.v1') || '[]');
+      return raw.map(function (t) { return t.title; });
+    } catch (err) { return ['<storage error: ' + err.message + '>']; }
+  }
+  function summaryText() { return q('#summary-text').textContent; }
+
+  function click(node) {
+    node.dispatchEvent(new win.MouseEvent('click', { bubbles: true, cancelable: true }));
+  }
+
+  function fire(node, type, init) {
+    node.dispatchEvent(new win.Event(type, { bubbles: true, cancelable: true }));
+  }
+
+  function key(node, value, extra) {
+    var init = { key: value, bubbles: true, cancelable: true };
+    if (extra) Object.keys(extra).forEach(function (k) { init[k] = extra[k]; });
+    node.dispatchEvent(new win.KeyboardEvent('keydown', init));
+  }
+
+  function dragEvent(type, node, clientY, dt) {
+    var init = { bubbles: true, cancelable: true, clientX: 20, clientY: clientY, dataTransfer: dt };
+    var event;
+    try {
+      event = new win.DragEvent(type, init);
+    } catch (err) {
+      event = new win.MouseEvent(type, init);
+      try { Object.defineProperty(event, 'dataTransfer', { value: dt }); } catch (err2) { /* ignore */ }
+    }
+    node.dispatchEvent(event);
+    return event;
+  }
+
+  function fakeDataTransfer() {
+    return {
+      effectAllowed: '', dropEffect: '',
+      setData: function () {}, getData: function () { return ''; }
+    };
+  }
+
+  function taskWith(list, title) {
+    for (var i = 0; i < list.length; i++) {
+      var node = list[i];
+      if (title === undefined) return node;
+      var label = node.querySelector('.task-title');
+      if (label && label.textContent === title) return node;
+    }
+    return null;
+  }
+
+  /* ---------------- the scripted run ---------------- */
+
+  var steps = [];
+
+  steps.push(function step_boot() {
+    log('--- load ---');
+    check('demo list renders three tasks', rows().length === 3, rows().length + ' rows');
+    check('expanded demo task shows its sub-tasks', qa('.subtask').length === 2, qa('.subtask').length + ' sub-task rows');
+    check('today label is filled in', /\w/.test(q('#today').textContent), q('#today').textContent);
+    check('summary reflects the demo data',
+      /2 tasks left/.test(summaryText()) && /1 done/.test(summaryText()), summaryText());
+    check('no storage warning on file://', qa('#toast-region .toast').length === 0, 'toast appeared');
+    check('empty state stays hidden while tasks exist', q('#empty').hidden === true, 'empty state visible');
+  });
+
+  steps.push(function step_add() {
+    log('--- add / rename ---');
+    q('#new-task').value = 'Buy oat milk';
+    q('#new-priority').value = 'high';
+    fire(q('#add-form'), 'submit');
+    check('form adds the task at the top', titles()[0] === 'Buy oat milk', titles().join(' | '));
+    check('input is cleared and refocused', q('#new-task').value === '' && doc.activeElement === q('#new-task'),
+      'value=' + q('#new-task').value);
+    check('new task shows its priority chip', !!taskWith(rows(), 'Buy oat milk').querySelector('.pri-high'), 'no pri-high chip');
+    check('summary counts the new task', /3 tasks left/.test(summaryText()), summaryText());
+
+    q('#new-task').value = '    ';
+    fire(q('#add-form'), 'submit');
+    check('blank submissions are ignored', rows().length === 4, rows().length + ' rows');
+    q('#new-task').value = '';
+  });
+
+  steps.push(function step_rename() {
+    click(taskWith(rows(), 'Plan the week ahead').querySelector('[data-action="edit-task"]'));
+    var input = q('[data-action="save-task-title"]');
+    check('edit button turns the title into an input', !!input, 'no rename input appeared');
+    if (!input) return;
+
+    input.value = 'Plan the sprint';
+    key(input, 'Enter');
+    check('Enter saves the new title', !!taskWith(rows(), 'Plan the sprint'), titles().join(' | '));
+    check('the rename input is gone afterwards', !q('[data-action="save-task-title"]'), 'input still in the DOM');
+
+    click(taskWith(rows(), 'Plan the sprint').querySelector('[data-action="edit-task"]'));
+    var second = q('[data-action="save-task-title"]');
+    second.value = 'throw this away';
+    key(second, 'Escape');
+    check('Escape cancels the rename', !!taskWith(rows(), 'Plan the sprint'), titles().join(' | '));
+  });
+
+  steps.push(function step_delete_undo() {
+    log('--- delete / complete ---');
+    var before = titles();
+    click(taskWith(rows(), 'Buy oat milk').querySelector('[data-action="delete-task"]'));
+    check('delete removes the row', !taskWith(rows(), 'Buy oat milk'), titles().join(' | '));
+
+    var undo = q('#toast-region .toast .btn');
+    check('undo toast is offered', !!undo && undo.textContent === 'Undo', undo ? undo.textContent : 'no toast');
+    if (undo) click(undo);
+    check('undo puts the task back in place', titles().join(' | ') === before.join(' | '), titles().join(' | '));
+  });
+
+  steps.push(function step_complete() {
+    click(taskWith(rows(), 'Buy oat milk').querySelector('[data-action="toggle-task"]'));
+    check('clicking the box marks a task done',
+      taskWith(rows(), 'Buy oat milk').classList.contains('is-done'), 'no is-done class');
+    check('summary updates as work is finished', /2 tasks left/.test(summaryText()), summaryText());
+
+    click(taskWith(rows(), 'Buy oat milk').querySelector('[data-action="toggle-task"]'));
+    check('clicking again reopens the task',
+      !taskWith(rows(), 'Buy oat milk').classList.contains('is-done'), 'still is-done');
+  });
+
+  steps.push(function step_parent_cascade() {
+    var title = 'Welcome — try the features';
+    var expander = taskWith(rows(), title).querySelector('[data-action="expand"]');
+    if (expander.getAttribute('aria-expanded') === 'false') click(expander);
+    check('expanding shows the sub-task editor', qa('.subtask').length > 0, 'no sub-task rows');
+
+    click(taskWith(rows(), title).querySelector('[data-action="toggle-task"]'));
+    var subs = qa('.subtask');
+    check('ticking a parent ticks its sub-tasks',
+      subs.length > 0 && subs.every(function (s) { return s.classList.contains('is-done'); }),
+      subs.map(function (s) { return s.className; }).join(' / '));
+
+    click(taskWith(rows(), title).querySelector('[data-action="toggle-task"]'));
+    var reopened = qa('.subtask');
+    check('unticking a parent clears its sub-tasks',
+      reopened.every(function (s) { return !s.classList.contains('is-done'); }), 'a sub-task stayed done');
+    check('the parent is open again', !taskWith(rows(), title).classList.contains('is-done'), 'parent still is-done');
+  });
+
+  steps.push(function step_subtasks() {
+    log('--- sub-tasks ---');
+    var title = 'Plan the sprint';
+    var expander = taskWith(rows(), title).querySelector('[data-action="expand"]');
+    if (expander.getAttribute('aria-expanded') === 'false') click(expander);
+
+    var input = taskWith(rows(), title).querySelector('[data-action="add-sub"]');
+    check('the sub-task input is available', !!input, 'no add-sub input');
+    if (!input) return;
+
+    input.value = 'Write the acceptance list';
+    key(input, 'Enter');
+    check('Enter adds the sub-task',
+      qa('.subtask-title').some(function (n) { return n.textContent === 'Write the acceptance list'; }),
+      qa('.subtask-title').map(function (n) { return n.textContent; }).join(' | '));
+    check('the sub-task input is cleared for the next one',
+      taskWith(rows(), title).querySelector('[data-action="add-sub"]').value === '', 'input kept its text');
+
+    var subRow = taskWith(rows(), title).querySelector('.subtask');
+    click(subRow.querySelector('[data-action="toggle-sub"]'));
+    check('a ticked sub-task shows as done',
+      taskWith(rows(), title).querySelector('.subtask').classList.contains('is-done'), 'sub-task not marked');
+    check('a partly finished parent stays open',
+      !taskWith(rows(), title).classList.contains('is-done'), 'parent was marked done too early');
+
+    click(taskWith(rows(), title).querySelector('.subtask [data-action="toggle-sub"]'));
+    check('unticking the sub-task clears it again',
+      !taskWith(rows(), title).querySelector('.subtask').classList.contains('is-done'), 'sub-task still done');
+  });
+
+  steps.push(function step_search() {
+    log('--- search / filter / sort ---');
+    q('#search').value = 'sprint';
+    fire(q('#search'), 'input');
+    check('search narrows the list', rows().length === 1 && titles()[0] === 'Plan the sprint', titles().join(' | '));
+
+    q('#search').value = 'acceptance';
+    fire(q('#search'), 'input');
+    check('search matches sub-task titles', rows().length === 1, titles().join(' | '));
+    check('search shows the empty-state hint when nothing matches', q('#empty').hidden === false || rows().length === 1,
+      'empty state visible with a match');
+
+    click(q('#search-clear'));
+    check('clearing search restores every task', rows().length === 4 && q('#search').value === '', rows().length + ' rows');
+
+    click(q('.tab[data-filter="completed"]'));
+    check('completed filter shows only finished work',
+      rows().length > 0 && rows().every(function (r) { return r.classList.contains('is-done'); }),
+      rows().map(function (r) { return r.className; }).join(' / '));
+
+    click(q('.tab[data-filter="active"]'));
+    check('active filter hides finished work',
+      rows().length > 0 && rows().every(function (r) { return !r.classList.contains('is-done'); }),
+      rows().map(function (r) { return r.className; }).join(' / '));
+
+    click(q('.tab[data-filter="all"]'));
+    check('all filter brings everything back', rows().length === 4, rows().length + ' rows');
+
+    q('#sort').value = 'title';
+    fire(q('#sort'), 'change');
+    var domRows = rows();
+    var titleOf = function (r) { return r.querySelector('.task-title').textContent; };
+    var isDone = function (r) { return r.classList.contains('is-done'); };
+    var openTitles = domRows.filter(function (r) { return !isDone(r); }).map(titleOf);
+    var doneTitles = domRows.filter(isDone).map(titleOf);
+    check('title sort is alphabetical and keeps done work last',
+      openTitles.join('|') === openTitles.slice().sort(function (a, b) { return a.localeCompare(b); }).join('|') &&
+      titles().join('|') === openTitles.concat(doneTitles).join('|'),
+      titles().join(' | '));
+    q('#sort').value = 'manual';
+    fire(q('#sort'), 'change');
+    check('manual sort restores the stored order', titles()[0] === 'Buy oat milk', titles().join(' | '));
+  });
+
+  steps.push(function step_bulk_actions() {
+    log('--- bulk actions ---');
+    var doneBefore = rows().filter(function (r) { return r.classList.contains('is-done'); }).length;
+
+    click(q('#toggle-all'));
+    check('mark-all ticks every task', rows().every(function (r) { return r.classList.contains('is-done'); }),
+      rows().map(function (r) { return r.className; }).join(' / '));
+    var undo = q('#toast-region .toast .btn');
+    check('mark-all offers an undo', !!undo, 'no toast');
+    if (undo) click(undo);
+    check('undo restores the earlier mix of open and done work',
+      rows().filter(function (r) { return r.classList.contains('is-done'); }).length === doneBefore,
+      'completion state changed');
+
+    var beforeClear = titles();
+    var keptBack = rows().length;
+    click(q('#clear-completed'));
+    check('clear-done removes the finished rows', rows().length < keptBack, rows().length + ' of ' + keptBack + ' rows');
+    var second = q('#toast-region .toast .btn');
+    if (second) click(second);
+    check('undo brings cleared work back', titles().join(' | ') === beforeClear.join(' | '), titles().join(' | '));
+  });
+
+  steps.push(function step_drag() {
+    log('--- drag & drop ---');
+    var before = titles();
+    var list = q('#task-list');
+    var first = rows()[0];
+    var last = rows()[rows().length - 1];
+    var source = last.querySelector('.grip');
+    var box = first.getBoundingClientRect();
+    var dt = fakeDataTransfer();
+
+    dragEvent('dragstart', source, box.top, dt);
+    check('drag start marks the row being dragged',
+      last.classList.contains('is-dragging'), 'no is-dragging class');
+
+    dragEvent('dragover', list, box.top + 1, dt);
+    check('drag over shows a drop indicator',
+      !!q('#task-list .drop-before, #task-list .drop-after'), 'no drop hint');
+
+    dragEvent('drop', list, box.top + 1, dt);
+    check('drag state is cleared after the drop', !q('#task-list .is-dragging'), 'row still marked as dragging');
+    check('the dropped task moves to the top', titles()[0] === before[before.length - 1],
+      'order is now ' + titles().join(' | '));
+    check('no task is lost while dragging', titles().length === before.length, titles().join(' | '));
+  });
+
+  steps.push(function step_shortcuts() {
+    log('--- keyboard ---');
+    if (doc.activeElement && doc.activeElement.blur) doc.activeElement.blur();
+
+    key(doc, 'n');
+    check('pressing N focuses the new-task field', doc.activeElement && doc.activeElement.id === 'new-task',
+      doc.activeElement ? (doc.activeElement.id || doc.activeElement.tagName) : 'nothing focused');
+
+    if (doc.activeElement && doc.activeElement.blur) doc.activeElement.blur();
+    key(doc, '/');
+    check('pressing / focuses search', doc.activeElement && doc.activeElement.id === 'search',
+      doc.activeElement ? (doc.activeElement.id || doc.activeElement.tagName) : 'nothing focused');
+
+    key(doc, 'Escape');
+    check('Escape leaves the search box', doc.activeElement !== q('#search'), 'search still focused');
+
+    var firstTitle = titles()[0];
+    var grip = rows()[0].querySelector('.grip');
+    grip.focus();
+    key(grip, 'ArrowDown', { altKey: true });
+    check('Alt+ArrowDown moves the focused task down', titles()[0] !== firstTitle,
+      'order unchanged: ' + titles().join(' | '));
+
+    var details = q('.foot details');
+    var wasOpen = details.open;
+    key(doc, '?');
+    check('pressing ? toggles the shortcut help', details.open !== wasOpen, 'help did not toggle');
+    key(doc, '?');
+  });
+
+  steps.push(function step_theme_storage() {
+    log('--- theme & storage ---');
+    var start = doc.documentElement.getAttribute('data-theme');
+    click(q('#theme-btn'));
+    var afterOne = doc.documentElement.getAttribute('data-theme');
+    check('the theme button switches theme', afterOne !== start, start + ' -> ' + afterOne);
+    click(q('#theme-btn'));
+    click(q('#theme-btn'));
+    check('the theme cycles back to the original',
+      doc.documentElement.getAttribute('data-theme') === start, doc.documentElement.getAttribute('data-theme'));
+
+    check('tasks are written to localStorage', storedTitles().join(' | ') === titles().join(' | '),
+      'stored: ' + storedTitles().join(' | ') + '  rendered: ' + titles().join(' | '));
+    check('preferences are written to localStorage', !!win.localStorage.getItem('todo.prefs.v1'), 'no prefs key');
+    check('the list kept four tasks through the whole run', storedTitles().length === 4, storedTitles().length + ' tasks');
+
+    click(q('.tab[data-filter="completed"]'));
+    var doneOnly = rows().length;
+    click(q('.tab[data-filter="all"]'));
+    check('switching filters never loses tasks', rows().length === 4 && doneOnly >= 0, rows().length + ' rows');
+    check('the empty state stays hidden', q('#empty').hidden === true, 'empty state shown');
+  });
+
+  /* ---------------- runner ---------------- */
+
+  var finished = false;
+
+  function finish() {
+    var failures = results.filter(function (ok) { return !ok; }).length;
+    var line = 'E2E: ' + (results.length - failures) + ' passed, ' + failures + ' failed';
+    log('\n' + line);
+    document.title = line;
+    var marker = document.createElement('div');
+    marker.id = 'e2e-summary';
+    marker.textContent = line;
+    document.body.appendChild(marker);
+  }
+
+  function runStep(index) {
+    if (finished) return;
+    if (index >= steps.length) {
+      finished = true;
+      finish();
+      return;
+    }
+    try {
+      steps[index]();
+    } catch (err) {
+      check('step ' + index + ' (' + (steps[index].name || 'anonymous') + ') threw', false, err && err.message);
+    }
+    win.setTimeout(function () { runStep(index + 1); }, 120);
+  }
+
+  var frame = document.getElementById('app');
+  var started = false;
+
+  frame.addEventListener('load', function () {
+    if (started) return;
+    started = true;
+    doc = frame.contentDocument;
+    win = frame.contentWindow;
+    out.textContent = '';
+    if (!doc || !doc.querySelector('#task-list')) {
+      check('app frame loaded', false, 'no #task-list inside the frame');
+      finished = true;
+      finish();
+      return;
+    }
+    win.localStorage.clear();
+    runStep(0);
+  });
+
+  setTimeout(function () {
+    if (!finished) {
+      finished = true;
+      check('the run finished before the watchdog fired', false, 'still running after 25s');
+      finish();
+    }
+  }, 25000);
+
+})();
+</script>
+</body>
+</html>
