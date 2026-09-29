@@ -1,6 +1,7 @@
 /* ============================================================
-   app.js — wires the DOM to the store: events, drag & drop,
-   undo toasts, import/export and keyboard shortcuts.
+   app.js — the controller: it wires DOM events to the store and
+   keeps the view's own concerns (draft edits in the detail rail,
+   focus, drag & drop, undo toasts, import/export, shortcuts).
    ============================================================ */
 (function (global) {
   'use strict';
@@ -22,7 +23,24 @@
   }
 
   function applyTheme() {
-    document.documentElement.setAttribute('data-theme', S.state.prefs.theme);
+    global.document.documentElement.setAttribute('data-theme', S.state.prefs.theme);
+  }
+
+  function taskById(id) {
+    var list = S.state.tasks;
+    for (var i = 0; i < list.length; i++) {
+      if (list[i].id === id) return list[i];
+    }
+    return null;
+  }
+
+  function focusNewTask() {
+    UI.focusElement('new-task');
+  }
+
+  function focusRailTitle() {
+    var input = refs.detail && refs.detail.querySelector('#detail-title');
+    if (input) input.focus();
   }
 
   /* ---------------- adding ---------------- */
@@ -33,7 +51,8 @@
     var created = S.addTask({
       title: input.value,
       priority: refs['new-priority'].value,
-      dueDate: refs['new-due'].value
+      dueDate: refs['new-due'].value,
+      tags: refs['new-tags'].value.split(',')
     });
     if (!created) {
       input.focus();
@@ -41,47 +60,14 @@
     }
     input.value = '';
     refs['new-due'].value = '';
+    refs['new-tags'].value = '';
+    /* Open the fresh task so notes, tags and sub-tasks can be added right away. */
+    S.selectTask(created.id);
     input.focus();
     storageWarning();
   }
 
-  function addSubtaskFromInput(taskId, input) {
-    if (!input) return;
-    if (isBlank(input.value)) {
-      input.focus();
-      return;
-    }
-    S.addSubtask(taskId, input.value);
-    var fresh = refs['task-list'].querySelector('[data-action="add-sub"][data-id="' + taskId + '"]');
-    if (fresh) {
-      fresh.value = '';
-      fresh.focus();
-    }
-    storageWarning();
-  }
-
-  /* ---------------- commit helpers ----------------
-     closeEdit() runs *before* the write so that "blur commits" and a
-     click on another control can never apply the same edit twice.     */
-
-  function commitTaskTitle(input) {
-    var id = input.dataset.id;
-    if (UI.view.editingTask !== id) return;
-    var value = input.value;
-    UI.closeEdit();
-    if (!isBlank(value)) S.updateTask(id, { title: value });
-    storageWarning();
-  }
-
-  function commitSubTitle(input) {
-    var taskId = input.dataset.task;
-    var subId = input.dataset.id;
-    if (!UI.view.editingSub || UI.view.editingSub.subId !== subId) return;
-    var value = input.value;
-    UI.closeEdit();
-    if (!isBlank(value)) S.updateSubtask(taskId, subId, { title: value });
-    storageWarning();
-  }
+  /* ---------------- deletes ---------------- */
 
   function removeTask(id) {
     var removed = S.deleteTask(id);
@@ -89,6 +75,7 @@
     UI.showToast('Deleted \u201c' + removed.task.title + '\u201d', 'Undo', function () {
       S.restoreTask(removed.task, removed.index);
     });
+    focusNewTask();
     storageWarning();
   }
 
@@ -98,114 +85,155 @@
     UI.showToast('Deleted sub-task \u201c' + removed.subtask.title + '\u201d', 'Undo', function () {
       S.restoreSubtask(taskId, removed.subtask, removed.index);
     });
+    var input = railSubInput(taskId);
+    if (input) input.focus();
     storageWarning();
   }
 
-  /* ---------------- delegated list events ---------------- */
+  function railSubInput(taskId) {
+    if (!refs.detail) return null;
+    return refs.detail.querySelector('[data-action="add-sub"][data-id="' + taskId + '"]');
+  }
 
-  function onListClick(event) {
+  function addSubtaskFromInput(taskId, input) {
+    if (!input) return;
+    if (isBlank(input.value)) {
+      input.focus();
+      return;
+    }
+    S.addSubtask(taskId, input.value);
+    var fresh = railSubInput(taskId);
+    if (fresh) {
+      fresh.value = '';
+      fresh.focus();
+    }
+    storageWarning();
+  }
+
+  /** Write the rail draft (if any) and report what happened. */
+  function saveDraft() {
+    var patch = UI.draftPatch();
+    if (!patch) {
+      UI.render();
+      return null;
+    }
+    if (isBlank(patch.title)) {
+      UI.showToast('A task needs a title before it can be saved.');
+      focusRailTitle();
+      return null;
+    }
+    var saved = UI.commitDraft();
+    if (saved) UI.showToast('Saved \u201c' + saved.title + '\u201d.');
+    storageWarning();
+    return saved;
+  }
+  /* ---------------- board (task rows) ---------------- */
+
+  function onBoardClick(event) {
     var target = event.target.closest ? event.target.closest('[data-action]') : null;
     if (!target || !refs['task-list'].contains(target)) return;
 
     var action = target.dataset.action;
     var id = target.dataset.id;
+    var open = S.selectedTask();
+
+    if (action === 'toggle-task') {
+      S.toggleTask(id);
+    } else if (action === 'select') {
+      /* Clicking the open task again closes the rail. */
+      S.selectTask(open && open.id === id ? null : id);
+    } else if (action === 'move') {
+      S.moveTask(id, target.dataset.dir);
+    } else {
+      return; /* the grip is handled by the drag handlers */
+    }
+    storageWarning();
+  }
+
+  /* ---------------- detail rail ---------------- */
+
+  function onRailClick(event) {
+    var target = event.target.closest ? event.target.closest('[data-action]') : null;
+    if (!target || !refs.detail || !refs.detail.contains(target)) return;
+
+    var action = target.dataset.action;
+    var id = target.dataset.id;
     var taskId = target.dataset.task || id;
-    var task;
 
     switch (action) {
-      case 'toggle-task':
-        S.toggleTask(id);
-        break;
-      case 'expand':
-        task = S.state.tasks.filter(function (t) { return t.id === id; })[0];
-        if (task) S.updateTask(id, { expanded: !task.expanded });
-        break;
-      case 'edit-task':
-        UI.beginEditTask(id);
-        break;
-      case 'delete-task':
-        removeTask(id);
-        break;
       case 'toggle-sub':
         S.toggleSubtask(taskId, id);
-        break;
-      case 'edit-sub':
-        UI.beginEditSub(taskId, id);
         break;
       case 'delete-sub':
         removeSubtask(taskId, id);
         break;
       case 'add-sub-click':
-        addSubtaskFromInput(id, refs['task-list'].querySelector('[data-action="add-sub"][data-id="' + id + '"]'));
+        addSubtaskFromInput(taskId, railSubInput(taskId));
+        break;
+      case 'delete-task':
+        removeTask(id);
+        break;
+      case 'close-detail':
+        UI.closeDetail();
+        break;
+      case 'save-task':
+        saveDraft();
         break;
       case 'move':
         S.moveTask(id, target.dataset.dir);
         break;
-      case 'clear-due':
-        S.updateTask(id, { dueDate: null });
-        break;
       default:
-        break; /* grip and inputs are handled by the drag / key handlers */
+        break;
     }
     storageWarning();
   }
 
-  function onListKeydown(event) {
+  function onRailInput(event) {
+    var field = event.target.dataset ? event.target.dataset.field : null;
+    if (field) UI.editDraft(field, event.target.value);
+  }
+
+  function onRailChange(event) {
+    var field = event.target.dataset ? event.target.dataset.field : null;
+    if (field) UI.editDraft(field, event.target.value);
+  }
+
+  function onRailKeydown(event) {
     var target = event.target;
     var action = target.dataset ? target.dataset.action : null;
-    if (!action) return;
+
+    if (event.altKey && (event.key === 'ArrowUp' || event.key === 'ArrowDown')) {
+      var open = S.selectedTask();
+      if (open) {
+        event.preventDefault();
+        S.moveTask(open.id, event.key === 'ArrowUp' ? 'up' : 'down');
+        storageWarning();
+      }
+      return;
+    }
 
     if (event.key === 'Enter') {
       if (action === 'add-sub') {
         event.preventDefault();
         addSubtaskFromInput(target.dataset.id, target);
-      } else if (action === 'save-task-title') {
-        event.preventDefault();
-        commitTaskTitle(target);
-      } else if (action === 'save-sub-title') {
-        event.preventDefault();
-        commitSubTitle(target);
+      } else if (target.tagName === 'INPUT' && target.dataset && target.dataset.field) {
+        event.preventDefault(); /* Enter saves instead of submitting anything */
+        saveDraft();
       }
-    } else if (event.key === 'Escape') {
-      if (action === 'save-task-title' || action === 'save-sub-title') {
-        event.preventDefault();
-        UI.closeEdit();
-      } else if (action === 'add-sub') {
-        target.value = '';
-        target.blur();
+      return;
+    }
+
+    if (event.key === 'Escape') {
+      event.stopPropagation();
+      event.preventDefault();
+      if (UI.hasDraft()) {
+        UI.revertDraft();
+        UI.showToast('Changes reverted.');
+      } else {
+        UI.closeDetail();
       }
+      storageWarning();
     }
-  }
-
-  /** Blur commits a rename; after Escape the edit mode is gone so this no-ops. */
-  function onListFocusOut(event) {
-    var action = event.target.dataset ? event.target.dataset.action : null;
-    if (action === 'save-task-title') commitTaskTitle(event.target);
-    else if (action === 'save-sub-title') commitSubTitle(event.target);
-  }
-
-  var notesTimer = null;
-
-  function onListInput(event) {
-    var target = event.target;
-    if (target.dataset && target.dataset.action === 'set-notes') {
-      var id = target.dataset.id;
-      var value = target.value;
-      global.clearTimeout(notesTimer);
-      notesTimer = global.setTimeout(function () {
-        S.updateTask(id, { notes: value });
-        storageWarning();
-      }, 350);
-    }
-  }
-
-  function onListChange(event) {
-    var target = event.target;
-    var action = target.dataset ? target.dataset.action : null;
-    if (action === 'set-priority') S.updateTask(target.dataset.id, { priority: target.value });
-    else if (action === 'set-due') S.updateTask(target.dataset.id, { dueDate: target.value });
-    else return;
-    storageWarning();
   }
 
   /* ---------------- drag to reorder (manual sort only) ---------------- */
@@ -284,12 +312,26 @@
     });
   }
 
-  /* ---------------- toolbar / chrome controls ---------------- */
+  /* ---------------- sidebar: views, lists and tags ---------------- */
 
-  function onFilterClick(event) {
+  function onViewsClick(event) {
     var tab = event.target.closest ? event.target.closest('.tab[data-filter]') : null;
     if (tab) S.setFilter(tab.dataset.filter);
   }
+
+  function onPriorityClick(event) {
+    var facet = event.target.closest ? event.target.closest('.facet[data-priority]') : null;
+    if (facet) S.setPriorityFilter(facet.dataset.priority);
+  }
+
+  function onTagClick(event) {
+    var facet = event.target.closest ? event.target.closest('.facet[data-tag]') : null;
+    if (!facet) return;
+    var value = facet.dataset.tag;
+    /* Clicking the tag that is already on clears it. */
+    S.setTagFilter(value && value === S.state.prefs.tag ? '' : value);
+  }
+  /* ---------------- search & toolbar ---------------- */
 
   function onSearchInput(event) {
     S.setQuery(event.target.value);
@@ -327,6 +369,7 @@
     UI.showToast('Deleted ' + plural(total, 'task'), 'Undo', function () {
       S.restoreAll(snapshot);
     });
+    focusNewTask();
     storageWarning();
   }
 
@@ -368,6 +411,11 @@
     reader.readAsText(file);
   }
 
+  /** Clicks on a toast's "Undo" button. */
+  function onToastClick(event) {
+    var button = event.target.closest ? event.target.closest('[data-action="toast-undo"]') : null;
+    if (button) UI.undoToast(button);
+  }
   /* ---------------- global keyboard shortcuts ---------------- */
 
   function onGlobalKeydown(event) {
@@ -376,12 +424,13 @@
     var typing = tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' ||
       !!(active && active.isContentEditable);
 
-    /* Alt + arrows reorder the task that currently has focus */
+    /* Alt + arrows reorder the task that is open in the rail */
     if (event.altKey && (event.key === 'ArrowUp' || event.key === 'ArrowDown')) {
-      var item = active && active.closest ? active.closest('.task') : null;
-      if (item && item.dataset.id) {
+      if (typing) return; /* the rail handler covers edits made from inside a field */
+      var open = S.selectedTask();
+      if (open) {
         event.preventDefault();
-        S.moveTask(item.dataset.id, event.key === 'ArrowUp' ? 'up' : 'down');
+        S.moveTask(open.id, event.key === 'ArrowUp' ? 'up' : 'down');
         storageWarning();
       }
       return;
@@ -390,12 +439,10 @@
     if (event.metaKey || event.ctrlKey || event.altKey) return;
 
     if (event.key === 'Escape') {
-      if (active && active.dataset && active.dataset.action &&
-          active.dataset.action.indexOf('save-') === 0) {
-        return; /* the list handler already cancelled this rename */
-      }
-      if (UI.view.editingTask || UI.view.editingSub) {
-        UI.closeEdit();
+      if (UI.hasDraft()) {
+        UI.revertDraft();
+      } else if (refs.search.value) {
+        clearSearch();
       } else if (typing && active.blur) {
         active.blur();
       }
@@ -406,7 +453,7 @@
 
     if (event.key === 'n' || event.key === 'N' || event.key === '+') {
       event.preventDefault();
-      refs['new-task'].focus();
+      focusNewTask();
     } else if (event.key === '/') {
       event.preventDefault();
       refs.search.focus();
@@ -423,18 +470,22 @@
   function wire() {
     refs['add-form'].addEventListener('submit', submitNewTask);
 
-    refs['task-list'].addEventListener('click', onListClick);
-    refs['task-list'].addEventListener('keydown', onListKeydown);
-    refs['task-list'].addEventListener('focusout', onListFocusOut);
-    refs['task-list'].addEventListener('input', onListInput);
-    refs['task-list'].addEventListener('change', onListChange);
+    refs['task-list'].addEventListener('click', onBoardClick);
     refs['task-list'].addEventListener('dragstart', onDragStart);
     refs['task-list'].addEventListener('dragover', onDragOver);
     refs['task-list'].addEventListener('dragleave', clearDropHints);
     refs['task-list'].addEventListener('drop', onDrop);
     refs['task-list'].addEventListener('dragend', endDrag);
 
-    global.document.querySelector('.controls').addEventListener('click', onFilterClick);
+    refs.detail.addEventListener('click', onRailClick);
+    refs.detail.addEventListener('input', onRailInput);
+    refs.detail.addEventListener('change', onRailChange);
+    refs.detail.addEventListener('keydown', onRailKeydown);
+
+    refs.views.addEventListener('click', onViewsClick);
+    refs['pri-list'].addEventListener('click', onPriorityClick);
+    refs['tag-list'].addEventListener('click', onTagClick);
+
     refs.search.addEventListener('input', onSearchInput);
     refs['search-clear'].addEventListener('click', clearSearch);
     refs.sort.addEventListener('change', function () { S.setSort(refs.sort.value); });
@@ -449,18 +500,19 @@
     refs['import-file'].addEventListener('change', onImportFile);
     refs['reset-btn'].addEventListener('click', onReset);
 
+    refs['toast-region'].addEventListener('click', onToastClick);
     global.document.addEventListener('keydown', onGlobalKeydown);
   }
 
   function boot() {
     UI.cacheRefs();
     wire();
-    S.subscribe(function () { UI.render(); });
-    S.init();               /* reads storage and emits "init" → first paint */
+    S.subscribe(function (reason) { UI.render(reason); });
     applyTheme();
+    S.init();               /* reads storage and emits "init" → first paint */
     UI.renderToday();
     storageWarning();
-    try { refs['new-task'].focus(); } catch (err) { /* ignore */ }
+    focusNewTask();
   }
 
   if (global.document.readyState === 'loading') {
@@ -470,6 +522,3 @@
   }
 
 })(typeof window !== 'undefined' ? window : globalThis);
-
-
-
